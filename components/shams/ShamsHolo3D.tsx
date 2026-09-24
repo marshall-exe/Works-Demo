@@ -28,7 +28,7 @@ const TARGET = new THREE.Vector3(0, -0.04, 0);
 const GAZE_SRC = 'https://d2ol7oe51mr4n9.cloudfront.net/user_2yL0kM874eMHYrfONaqBJJhKLjW/4a078922-3e24-460b-ac58-36006bad142f.mp4';
 const GAZE_COLS = 25;
 const GAZE_ROWS = 17;
-const GAZE_FADE = 0.045; // seconds to crossfade from the previous pose frame to the new one
+const GAZE_FADE = 0.03; // seconds to crossfade from the previous pose frame to the new one
 const GAZE_IDLE_MS = 2600; // no pointer movement for this long: she settles back into her idle loop
 
 // On the dark page the projector is dimmer and no light is added at her outline, so no white fringe shows.
@@ -287,7 +287,7 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
         want = true;
       }
       want = want && hasG && !s.isLive && !s.reduced;
-      gzx = ease(gzx, want ? tx : 0, want ? 13 : 5, dt); gzy = ease(gzy, want ? ty : 0, want ? 13 : 5, dt); // tight on the cursor, gentle on the way back
+      gzx = ease(gzx, want ? tx : 0, want ? 32 : 5, dt); gzy = ease(gzy, want ? ty : 0, want ? 32 : 5, dt); // tight on the cursor, gentle on the way back
       const off = Math.hypot(gzx, gzy);
       gazeW = ease(gazeW, want || off > 0.03 ? 1 : 0, want ? 7 : 2.5, dt);
       if (hasG && gazeW > 0.01) {
