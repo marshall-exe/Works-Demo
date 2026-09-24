@@ -21,10 +21,14 @@ const FLOOR_Y = -0.47;      // projector height (her waist fades into it)
 const PAD_R = 0.36;
 const Z_DEPTH = 0.3;        // how far her volume pushes the surface
 const TARGET = new THREE.Vector3(0, -0.04, 0);
-// Gaze clip: before anyone talks to her she follows the cursor with her eyes and head.
-// 8 equal takes in this order: right, down-right, down, down-left, left, up-left, up, up-right.
-const GAZE_SRC = '/api/shams-gaze/';
-const GAZE_DIRS = 8;
+// Gaze clip: before anyone talks to her she follows the cursor with her head and eyes.
+// The clip is a grid of poses rendered from her own frame: GAZE_COLS across (her gaze from screen left to right)
+// by GAZE_ROWS down (from up to down), one frame per pose, row by row. The centre pose looks straight at you.
+// Served straight from the media CDN (CORS enabled), every frame a keyframe so a seek decodes a single frame.
+const GAZE_SRC = 'https://d2ol7oe51mr4n9.cloudfront.net/user_2yL0kM874eMHYrfONaqBJJhKLjW/4a078922-3e24-460b-ac58-36006bad142f.mp4';
+const GAZE_COLS = 25;
+const GAZE_ROWS = 17;
+const GAZE_FADE = 0.045; // seconds to crossfade from the previous pose frame to the new one
 const GAZE_IDLE_MS = 2600; // no pointer movement for this long: she settles back into her idle loop
 
 // On the dark page the projector is dimmer and no light is added at her outline, so no white fringe shows.
@@ -70,14 +74,45 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
       return t;
     };
     const texA = mkVideoTex(iv);
-    // The gaze clip is scrubbed, not played; its texture is also refreshed on every finished seek.
-    const texG = mkVideoTex(gv);
-    let gazeFrame = false, seeking = false;
-    const onGazeFrame = () => { seeking = false; if (gv.readyState >= 2) { texG.needsUpdate = true; gazeFrame = true; } };
+    // The gaze clip is scrubbed, not played. Each landed seek is copied into one of two textures in turn and the
+    // shader crossfades from the previous pose to the new one, so she moves continuously between grid poses.
+    const mkStillTex = () => {
+      // A VideoTexture (three sizes these from the video itself) with its per-frame auto update switched off:
+      // it only refreshes when a seek lands and we flag it.
+      const t = new THREE.VideoTexture(gv);
+      const hook = t as unknown as { _requestVideoFrameCallbackId: number };
+      if (hook._requestVideoFrameCallbackId && 'cancelVideoFrameCallback' in gv) gv.cancelVideoFrameCallback(hook._requestVideoFrameCallbackId);
+      hook._requestVideoFrameCallbackId = 0;
+      t.update = () => {};
+      t.colorSpace = THREE.NoColorSpace;
+      t.minFilter = THREE.LinearFilter; t.magFilter = THREE.LinearFilter; t.generateMipmaps = false;
+      t.flipY = false;
+      return t;
+    };
+    const gTex = [mkStillTex(), mkStillTex()];
+    let gi = 0, gmix = 1;
+    // Only mouse users get the gaze clip (it follows a cursor); touch screens never download it.
+    const fine = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: fine)').matches;
+    if (fine && !state.current.reduced) { gv.crossOrigin = 'anonymous'; gv.src = GAZE_SRC; gv.load(); }
+    // gazeFrame latches once a frame has decoded. A seek drops readyState to 1 until it lands; the texture keeps
+    // the last frame meanwhile, so the gaze stays on screen instead of flashing back to the idle loop.
+    let gazeFrame = false, seeking = false, seekAt = 0, shownFrame = -1;
+    const onGazeFrame = () => {
+      seeking = false;
+      if (gv.readyState < 2 || !gv.videoWidth) return; // a texture first uploaded at 0 x 0 can never be resized
+      if (!gazeFrame) { gTex[0].needsUpdate = true; gTex[1].needsUpdate = true; gmix = 1; }
+      else { gi ^= 1; gTex[gi].needsUpdate = true; gmix = 0; }
+      shared.uG.value = gTex[gi]; shared.uG2.value = gTex[gi ^ 1];
+      gazeFrame = true;
+    };
     gv.addEventListener('seeked', onGazeFrame);
     gv.addEventListener('loadeddata', onGazeFrame);
     // a paused video only loads metadata; asking for a time makes it decode its first frame
-    const primeGaze = () => { try { seeking = true; gv.currentTime = 0.001; } catch { seeking = false; } };
+    const primeGaze = () => {
+      // decode the centre pose first (looking at you), so the first blend in never shows a corner pose
+      const mid = ((GAZE_ROWS - 1) / 2) * GAZE_COLS + (GAZE_COLS - 1) / 2;
+      try { seeking = true; seekAt = performance.now(); shownFrame = mid; gv.currentTime = (mid + 0.5) * (gv.duration || 1) / (GAZE_COLS * GAZE_ROWS); } catch { seeking = false; }
+    };
     if (gv.readyState >= 1) primeGaze(); else gv.addEventListener('loadedmetadata', primeGaze, { once: true });
     const blank = document.createElement('video');
     let texB: THREE.VideoTexture = mkVideoTex(blank);
@@ -90,7 +125,7 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
     const shared = {
       uA: { value: texA }, uB: { value: texB }, uDepth: { value: depth },
       uTexA: { value: new THREE.Vector2(1 / 960, 1 / 640) }, uTexB: { value: new THREE.Vector2(1 / 1152, 1 / 768) },
-      uG: { value: texG }, uTexG: { value: new THREE.Vector2(1 / 960, 1 / 640) }, uW: { value: new THREE.Vector3(1, 0, 0) },
+      uG: { value: gTex[0] }, uG2: { value: gTex[1] }, uGm: { value: 1 }, uTexG: { value: new THREE.Vector2(1 / 960, 1 / 640) }, uW: { value: new THREE.Vector3(1, 0, 0) },
       uTime: { value: 0 }, uReveal: { value: 0 }, uGlitch: { value: 0 }, uSpeak: { value: 0 }, uFx: { value: 1 },
       uZ: { value: Z_DEPTH }, uRim: { value: t0.rim.clone() }, uAccent: { value: t0.accent.clone() }, uRimK: { value: t0.rimK }, uUp: { value: 1 - t0.light },
     };
@@ -215,7 +250,7 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
 
     let raf = 0, last = performance.now();
     const start = last;
-    let mix = 0, gazeW = 0, gazeAmt = 0, gazeDir = 0, demo = 0, reveal = 0, glitch = 0, speak = 0, wasLive = false, revealing = false, yaw = 0, pitch = 0;
+    let mix = 0, gazeW = 0, gzx = 0, gzy = 0, reveal = 0, glitch = 0, speak = 0, wasLive = false, revealing = false, yaw = 0, pitch = 0;
     const ease = (cur: number, target: number, k: number, dt: number) => cur + (target - cur) * (1 - Math.exp(-k * dt));
 
     const frame = (now: number) => {
@@ -238,41 +273,37 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
       wasLive = liveReady;
       mix = ease(mix, liveReady ? 1 : 0, 5, dt);
 
-      // Gaze: she looks toward the cursor in any of 8 directions. The clip holds 8 short takes, one per direction,
-      // each running from looking at the lens to looking that way; the cursor's angle picks the take and its
-      // distance from her face picks how far into the take she is. Switching take reads as a natural glance.
+      // Gaze: the cursor's offset from her face sets a target on the pose grid; the pose glides toward it,
+      // so her head and eyes sweep through every angle in between instead of jumping.
       const r0 = el.getBoundingClientRect();
       const fx = r0.left + r0.width / 2, fy = r0.top + r0.height * 0.36;
-      const hasG = gazeFrame && gv.readyState >= 2 && gv.duration > 0;
-      let want = false, ang = 0, amt = 0;
+      const hasG = gazeFrame && gv.duration > 0 && gv.videoWidth > 0;
+      let want = false, tx = 0, ty = 0;
       if (ptr.moved && now - ptr.moved < GAZE_IDLE_MS) {
-        const dx = ptr.cx - fx, dy = ptr.cy - fy;
-        const d = Math.hypot(dx, dy) / (r0.height * 0.2);
-        ang = Math.atan2(dy, dx);
-        amt = Math.max(0, Math.min(1, (d - 0.7) / 1.3)); // cursor on her face: she looks straight at you
+        // normalised offset; soft limit so she keeps turning a little further as the cursor goes further out
+        const nx = (ptr.cx - fx) / (r0.height * 0.9), ny = (ptr.cy - fy) / (r0.height * 0.7);
+        const len = Math.hypot(nx, ny), soft = len > 0 ? Math.tanh(len * 1.4) / len : 0;
+        tx = nx * soft; ty = ny * soft;
         want = true;
-      } else if (!ptr.moved && inView && demo < 1 && hasG && !s.isLive && !s.reduced) {
-        // touch screens: one slow look around the first time she is on screen
-        demo = Math.min(1, demo + real / 9);
-        const phase = (demo * GAZE_DIRS) % 1;
-        ang = Math.floor(demo * GAZE_DIRS) * (Math.PI * 2 / GAZE_DIRS);
-        amt = Math.sin(phase * Math.PI);
-        want = demo < 0.999;
       }
       want = want && hasG && !s.isLive && !s.reduced;
-      if (want) {
-        const a = ang < 0 ? ang + Math.PI * 2 : ang;
-        const k = Math.round(a / (Math.PI * 2 / GAZE_DIRS)) % GAZE_DIRS;
-        gazeDir = k; // a change of direction reads as a quick glance
-      }
-      gazeAmt = ease(gazeAmt, want ? amt : 0, 6, dt);
-      gazeW = ease(gazeW, want || gazeAmt > 0.04 ? 1 : 0, want ? 6 : 3, dt);
-      if (hasG && gazeW > 0.01 && !seeking) {
-        const seg = gv.duration / GAZE_DIRS;
-        const t = gazeDir * seg + Math.min(0.999, gazeAmt) * (seg - 1 / 24);
-        if (Math.abs(gv.currentTime - t) > 0.02) { seeking = true; gv.currentTime = t; }
+      gzx = ease(gzx, want ? tx : 0, want ? 13 : 5, dt); gzy = ease(gzy, want ? ty : 0, want ? 13 : 5, dt); // tight on the cursor, gentle on the way back
+      const off = Math.hypot(gzx, gzy);
+      gazeW = ease(gazeW, want || off > 0.03 ? 1 : 0, want ? 7 : 2.5, dt);
+      if (hasG && gazeW > 0.01) {
+        const col = Math.round((Math.max(-1, Math.min(1, gzx)) + 1) / 2 * (GAZE_COLS - 1));
+        const row = Math.round((Math.max(-1, Math.min(1, gzy)) + 1) / 2 * (GAZE_ROWS - 1));
+        const f = row * GAZE_COLS + col;
+        if (seeking && now - seekAt > 600) seeking = false; // a seek that never lands must not freeze her
+        if (!seeking && f !== shownFrame) {
+          // one seek at a time, to the middle of the wanted frame
+          seeking = true; seekAt = now; shownFrame = f;
+          gv.currentTime = (f + 0.5) * gv.duration / (GAZE_COLS * GAZE_ROWS);
+        }
       }
       if (hasG) shared.uTexG.value.set(1 / gv.videoWidth, 1 / gv.videoHeight);
+      gmix = Math.min(1, gmix + real / GAZE_FADE);
+      shared.uGm.value = gmix;
       if (mix > 0.995 && !iv.paused) iv.pause();
       if (mix < 0.5 && !s.isLive && iv.paused && !s.reduced) iv.play().catch(() => {});
 
@@ -286,8 +317,8 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
       const scrollP = Math.max(-1, Math.min(1, (r.top + r.height / 2 - window.innerHeight / 2) / window.innerHeight));
       const tsec = (now - start) / 1000;
       ptr.x = ease(ptr.x, ptr.tx, 3, dt); ptr.y = ease(ptr.y, ptr.ty, 3, dt);
-      const yawT = s.reduced ? 0 : ptr.x * 0.26 + scrollP * 0.16 + Math.sin(tsec * 0.23) * 0.04;
-      const pitchT = s.reduced ? 0.05 : 0.05 - ptr.y * 0.07 + scrollP * 0.04;
+      const yawT = s.reduced ? 0 : ptr.x * 0.11 + scrollP * 0.16 + Math.sin(tsec * 0.23) * 0.04;
+      const pitchT = s.reduced ? 0.05 : 0.05 - ptr.y * 0.03 + scrollP * 0.04;
       yaw = ease(yaw, yawT, 4, dt); pitch = ease(pitch, pitchT, 4, dt);
       camera.position.set(
         TARGET.x + Math.sin(yaw) * Math.cos(pitch) * dist,
@@ -335,7 +366,7 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
       gv.removeEventListener('loadeddata', onGazeFrame);
       [bodyGeo, dustGeo, moteGeo, pad.geometry, beam.geometry].forEach((g) => g.dispose());
       [bodyMat, dustMat, padMat, beamMat, moteMat].forEach((m) => m.dispose());
-      [texA, texB, texG, depth].forEach((t) => t.dispose());
+      [texA, texB, gTex[0], gTex[1], depth].forEach((t) => t.dispose());
       renderer.dispose();
       cv.remove();
     };
@@ -347,7 +378,7 @@ export default function ShamsHolo3D({ live, stage, isLive, connecting, speaking,
       <video ref={idle} className="shams-idle-src" muted loop playsInline preload="auto" aria-hidden="true" tabIndex={-1}>
         <source src="/api/shams-idle/" type="video/mp4" />
       </video>
-      <video ref={gaze} className="shams-idle-src" src={GAZE_SRC} muted playsInline preload="auto" aria-hidden="true" tabIndex={-1} />
+      <video ref={gaze} className="shams-idle-src" muted playsInline preload="auto" aria-hidden="true" tabIndex={-1} />
     </div>
   );
 }

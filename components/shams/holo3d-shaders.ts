@@ -34,9 +34,20 @@ vec4 keyed(sampler2D t, vec2 uv, vec2 tx, out float edge) {
   float lum = dot(c, LW);
   float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
   a *= 1.0 - smoothstep(0.27, 0.42, lum) * (1.0 - smoothstep(0.10, 0.20, sat)) * nearBg; // grey haze in the hair
+  vec2 eb = (uv - vec2(0.5, 0.33)) / vec2(0.17, 0.09);
+  float prot = 0.0;
+  if (dot(eb, eb) < 1.0) {
+    vec2 q = tx * 14.0;
+    float ring = min(min(min(rawAt(t, uv + vec2(q.x, 0.0)), rawAt(t, uv - vec2(q.x, 0.0))),
+                         min(rawAt(t, uv + vec2(0.0, q.y)), rawAt(t, uv - vec2(0.0, q.y)))),
+                     min(min(rawAt(t, uv + q), rawAt(t, uv - q)),
+                         min(rawAt(t, uv + vec2(q.x, -q.y)), rawAt(t, uv + vec2(-q.x, q.y)))));
+    prot = smoothstep(0.35, 0.6, ring);
+    a = max(a, prot); // eye whites and catchlights inside her face
+  }
   vec2 pe = (uv - vec2(0.51, 1.0)) / vec2(0.11, 0.12);
   a = max(a, 1.0 - smoothstep(0.8, 1.0, length(pe))); // cream blouse inside the jacket
-  edge = a * (1.0 - smoothstep(0.3, 0.9, far));
+  edge = a * (1.0 - smoothstep(0.3, 0.9, far)) * (1.0 - prot);
   vec3 fg = clamp((c - (1.0 - a) * BG) / max(a, 0.001), 0.0, 1.0);
   // the outer hair still carries light from the old white background: pull it to hair tone and thin it
   vec3 hair = vec3(0.16, 0.11, 0.10);
@@ -50,6 +61,8 @@ const COMMON_UNIFORMS = /* glsl */ `
 uniform sampler2D uA;
 uniform sampler2D uB;
 uniform sampler2D uG;
+uniform sampler2D uG2;      // previous gaze pose, faded out over uGm
+uniform float uGm;
 uniform sampler2D uDepth;
 uniform vec2 uTexA;
 uniform vec2 uTexB;
@@ -123,7 +136,10 @@ void main() {
   float eA = 0.0, eG = 0.0, eB = 0.0;
   vec4 her = vec4(0.0);
   if (uW.x > 0.001) her += keyed(uA, vuv, uTexA, eA) * uW.x;
-  if (uW.y > 0.001) her += keyed(uG, vuv, uTexG, eG) * uW.y;
+  if (uW.y > 0.001) {
+    her += keyed(uG, vuv, uTexG, eG) * uW.y * uGm;
+    if (uGm < 0.999) { float e2 = 0.0; her += keyed(uG2, vuv, uTexG, e2) * uW.y * (1.0 - uGm); eG = mix(e2, eG, uGm); }
+  }
   if (uW.z > 0.001) her += keyed(uB, vuv, uTexB, eB) * uW.z;
   float edge = eA * uW.x + eG * uW.y + eB * uW.z;
 
